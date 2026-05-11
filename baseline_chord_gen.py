@@ -72,7 +72,7 @@ class GenerationResult:
     validation_errors: list[str]
     reward: float
     midi_path: Optional[str]
-    mp4_path: Optional[str] = None
+    mp3_path: Optional[str] = None
     report_path: Optional[str] = None
 
     def format_report(self) -> str:
@@ -86,8 +86,8 @@ class GenerationResult:
             lines.append(f"Errors  : {self.validation_errors}")
         if self.midi_path:
             lines.append(f"MIDI    : {self.midi_path}")
-        if self.mp4_path:
-            lines.append(f"MP4     : {self.mp4_path}")
+        if self.mp3_path:
+            lines.append(f"MP3     : {self.mp3_path}")
         lines += [
             "── Prompt ───────────────────────────────────────────",
             self.prompt,
@@ -148,7 +148,7 @@ def get_scale_pitch_names(key_str: str, mode: str) -> set[str]:
     if mode == "major":
         sc = m21scale.MajorScale(tonic)
     elif mode == "minor":
-        sc = m21scale.NaturalMinorScale(tonic)
+        sc = m21scale.MinorScale(tonic)
     else:
         sc = m21scale.MajorScale(tonic)
     return {p.name for p in sc.getPitches(f"{tonic}4", f"{tonic}5")}
@@ -289,55 +289,23 @@ def render_midi(chords: list[str], output_path: str, tempo: int = MIDI_TEMPO):
         midi.writeFile(f)
 
 
-def render_mp4(midi_path: str, output_path: str):
-    """Render a piano-roll MP4 with synthesized audio from a MIDI file.
+def render_mp3(midi_path: str, output_path: str):
+    """Synthesize MIDI to MP3.
 
-    Requires (Colab): !apt-get install -y fluidsynth && pip install midi2audio pretty_midi moviepy
-    Requires (Mac):   brew install fluidsynth && pip install midi2audio pretty_midi moviepy
+    Requires (Colab): !apt-get install -y fluidsynth && pip install midi2audio pydub
+    Requires (Mac):   brew install fluidsynth ffmpeg && pip install midi2audio pydub
     """
     import os, tempfile
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import pretty_midi
     from midi2audio import FluidSynth
-    from moviepy.editor import AudioFileClip, ImageClip
+    from pydub import AudioSegment
 
     wav_fd, wav_path = tempfile.mkstemp(suffix=".wav")
-    img_fd, img_path = tempfile.mkstemp(suffix=".png")
-    os.close(wav_fd); os.close(img_fd)
-
+    os.close(wav_fd)
     try:
         FluidSynth().midi_to_audio(midi_path, wav_path)
-
-        pm = pretty_midi.PrettyMIDI(midi_path)
-        roll = pm.get_piano_roll(fs=20)
-        active = np.where(roll.any(axis=1))[0]
-        lo, hi = max(active.min() - 3, 0), min(active.max() + 4, 128)
-
-        duration = pm.get_end_time()
-        fig, ax = plt.subplots(figsize=(12, 4), facecolor="#1e1e2e")
-        ax.set_facecolor("#1e1e2e")
-        ax.imshow(
-            roll[lo:hi],
-            aspect="auto", origin="lower", interpolation="nearest",
-            extent=[0, duration, lo, hi], cmap="Blues", vmin=0, vmax=100,
-        )
-        ax.set_xlabel("Time (s)", color="white")
-        ax.set_ylabel("MIDI Note", color="white")
-        ax.tick_params(colors="white")
-        for spine in ax.spines.values():
-            spine.set_edgecolor("#444")
-        plt.tight_layout()
-        fig.savefig(img_path, dpi=150)
-        plt.close(fig)
-
-        audio = AudioFileClip(wav_path)
-        ImageClip(img_path).set_duration(audio.duration).set_audio(audio).write_videofile(
-            output_path, fps=1, codec="libx264", audio_codec="aac", logger=None,
-        )
+        AudioSegment.from_wav(wav_path).export(output_path, format="mp3")
     finally:
         os.unlink(wav_path)
-        os.unlink(img_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -371,7 +339,7 @@ def generate(
     style: str = "jazz",
     num_bars: int = 8,
     output_midi_path: str = "output.mid",
-    output_mp4_path: Optional[str] = None,
+    output_mp3_path: Optional[str] = None,
     output_report_path: Optional[str] = None,
     model_id: str = MODEL_ID,
     temperature: float = 0.7,
@@ -430,15 +398,15 @@ def generate(
 
     # Render MIDI only if valid
     midi_path = None
-    mp4_path = None
+    mp3_path = None
     if valid:
         render_midi(chords, output_midi_path)
         midi_path = output_midi_path
         print(f"✓ Valid progression! MIDI saved to: {output_midi_path}")
-        if output_mp4_path:
-            render_mp4(output_midi_path, output_mp4_path)
-            mp4_path = output_mp4_path
-            print(f"✓ MP4 saved to: {output_mp4_path}")
+        if output_mp3_path:
+            render_mp3(output_midi_path, output_mp3_path)
+            mp3_path = output_mp3_path
+            print(f"✓ MP4 saved to: {output_mp3_path}")
     else:
         print(f"✗ Invalid progression (reward={reward}). No MIDI generated.")
 
@@ -450,7 +418,7 @@ def generate(
         validation_errors=errors,
         reward=reward,
         midi_path=midi_path,
-        mp4_path=mp4_path,
+        mp3_path=mp3_path,
     )
 
     report = result.format_report()
@@ -476,7 +444,7 @@ if __name__ == "__main__":
     parser.add_argument("--style",    default="jazz",     choices=list(STYLE_DESCRIPTIONS))
     parser.add_argument("--bars",     default=8,          type=int)
     parser.add_argument("--output",   default="output.mid")
-    parser.add_argument("--mp4",      default=None,         help="Path for MP4 output (requires fluidsynth, pretty_midi, moviepy)")
+    parser.add_argument("--mp3",      default=None,         help="Path for MP3 output (requires fluidsynth, pydub)")
     parser.add_argument("--report",   default=None,         help="Path to save text report")
     parser.add_argument("--model",    default=MODEL_ID)
     parser.add_argument("--temp",     default=0.7,        type=float)
@@ -488,7 +456,7 @@ if __name__ == "__main__":
         style=args.style,
         num_bars=args.bars,
         output_midi_path=args.output,
-        output_mp4_path=args.mp4,
+        output_mp3_path=args.mp3,
         output_report_path=args.report,
         model_id=args.model,
         temperature=args.temp,
