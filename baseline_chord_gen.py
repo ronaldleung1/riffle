@@ -19,19 +19,26 @@ Usage (Colab):
     print(result)
 """
 
-import json
-import re
+import itertools
 import statistics
 from dataclasses import dataclass
 from typing import Optional
 
 # ── music libs ───────────────────────────────────────────────────────────────
-from music21 import harmony, key as m21key, scale as m21scale
+from music21 import harmony
 from midiutil import MIDIFile
 
 # ── model libs ───────────────────────────────────────────────────────────────
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
+
+# ── reward primitives (model-free, also used by RL trainer) ──────────────────
+from chord_rewards import (
+    STYLE_DESCRIPTIONS,
+    build_prompt,
+    parse_chord_list,
+    validate,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -39,21 +46,6 @@ import torch
 # ─────────────────────────────────────────────────────────────────────────────
 
 MODEL_ID = "Qwen/Qwen3.5-2B"
-
-STYLE_DESCRIPTIONS = {
-    "jazz":   "Use 7th chords, 9th chords, and ii-V-I progressions. Aim for harmonic complexity.",
-    "pop":    "Use mostly I, IV, V, vi chords. Keep it simple and singable.",
-    "blues":  "Use dominant 7th chords on I, IV, and V. Follow 12-bar blues conventions.",
-    "folk":   "Use simple triads — I, IV, V, and maybe ii or vi. Keep it diatonic.",
-    "bossa":  "Similar to jazz but favour maj7, min7, dom7 chords with smooth voice leading.",
-}
-
-# Chords music21 struggles to parse — map them to equivalents
-CHORD_ALIASES = {
-    "maj": "maj",
-    "min": "m",
-    "m":   "m",
-}
 
 MIDI_TEMPO    = 120   # BPM
 BEATS_PER_BAR = 4
@@ -147,180 +139,93 @@ class BatchResult:
         return max(self.results, key=lambda r: r.reward)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prompt
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_prompt(key: str, mode: str, style: str, num_bars: int) -> str:
-    style_hint = STYLE_DESCRIPTIONS.get(style, "")
-    return (
-        f"Generate a {num_bars}-bar chord progression in {key} {mode}. "
-        f"Style: {style}. {style_hint}\n\n"
-        f"Rules:\n"
-        f"- Output ONLY a JSON array of {num_bars} chord symbol strings, nothing else.\n"
-        f"- Example format: [\"Cmaj7\", \"Am7\", \"Dm7\", \"G7\"]\n"
-        f"- Use standard chord symbols (e.g. Cmaj7, Dm7, G7, Am, Fmaj7).\n"
-        f"- Do not include bar numbers, explanations, or any other text.\n"
-        f"/no_think"
-    )
+@dataclass
+class GridCell:
+    """One (key, mode, style, num_bars) point in a grid sweep."""
+    key: str
+    mode: str
+    style: str
+    num_bars: int
+    batch: BatchResult
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Parsing
-# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class GridResult:
+    cells: list[GridCell]
+    n_cells: int
+    samples_per_cell: int
+    overall_pass_rate: float
+    overall_mean_reward: float
+    overall_mean_breakdown: dict
 
-def parse_chord_list(raw: str) -> Optional[list[str]]:
-    """Extract a JSON array of chord strings from raw model output."""
-    # Strip thinking tags if they sneak through
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    def as_rows(self) -> list[dict]:
+        """One row per cell, flat dict — easy to drop into pandas."""
+        return [
+            {
+                "key":         c.key,
+                "mode":        c.mode,
+                "style":       c.style,
+                "num_bars":    c.num_bars,
+                "n":           c.batch.n,
+                "pass_rate":   c.batch.pass_rate,
+                "mean_reward": c.batch.mean_reward,
+                "std_reward":  c.batch.std_reward,
+                "min_reward":  c.batch.min_reward,
+                "max_reward":  c.batch.max_reward,
+                **{f"mean_{k}": v for k, v in c.batch.mean_breakdown.items()},
+            }
+            for c in self.cells
+        ]
 
-    # Try to find a JSON array anywhere in the output
-    match = re.search(r"\[.*?\]", raw, re.DOTALL)
-    if not match:
-        return None
-    try:
-        chords = json.loads(match.group())
-        if isinstance(chords, list) and all(isinstance(c, str) for c in chords):
-            return [c.strip() for c in chords]
-    except json.JSONDecodeError:
-        pass
-    return None
+    def group_by(self, axis: str) -> dict[str, dict]:
+        """Aggregate cells by a single axis (e.g. 'style' or 'key')."""
+        groups: dict[str, list[BatchResult]] = {}
+        for c in self.cells:
+            groups.setdefault(getattr(c, axis), []).append(c.batch)
+        out = {}
+        for k, batches in groups.items():
+            all_results = [r for b in batches for r in b.results]
+            rewards = [r.reward for r in all_results]
+            out[k] = {
+                "n":           len(all_results),
+                "pass_rate":   round(sum(r.valid for r in all_results) / len(all_results), 3),
+                "mean_reward": round(statistics.fmean(rewards), 3),
+                "std_reward":  round(statistics.pstdev(rewards) if len(rewards) > 1 else 0.0, 3),
+            }
+        return out
 
+    def format_report(self) -> str:
+        lines = [
+            "═══ Grid Report ════════════════════════════════════════════════════",
+            f"Cells: {self.n_cells}   samples/cell: {self.samples_per_cell}   "
+            f"total runs: {self.n_cells * self.samples_per_cell}",
+            f"Overall pass rate : {self.overall_pass_rate:.0%}",
+            f"Overall mean rwd  : {self.overall_mean_reward:.3f}",
+            f"Overall breakdown : key={self.overall_mean_breakdown['key']:.3f}  "
+            f"style={self.overall_mean_breakdown['style']:.3f}  "
+            f"voice={self.overall_mean_breakdown['voice']:.3f}",
+            "── Per-cell ────────────────────────────────────────────────────────",
+            f"  {'key':<4} {'mode':<6} {'style':<6} {'bars':>4}  "
+            f"{'pass':>5}  {'mean':>6}  {'std':>6}  {'key':>5} {'sty':>5} {'voi':>5}",
+        ]
+        for c in self.cells:
+            b = c.batch
+            lines.append(
+                f"  {c.key:<4} {c.mode:<6} {c.style:<6} {c.num_bars:>4}  "
+                f"{b.pass_rate:>4.0%}   {b.mean_reward:>6.3f}  {b.std_reward:>6.3f}  "
+                f"{b.mean_breakdown['key']:>5.3f} "
+                f"{b.mean_breakdown['style']:>5.3f} "
+                f"{b.mean_breakdown['voice']:>5.3f}"
+            )
+        lines.append("════════════════════════════════════════════════════════════════════")
+        return "\n".join(lines)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Validation (reward functions)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_scale_pitch_names(key_str: str, mode: str) -> set[str]:
-    """Return the set of pitch name strings (e.g. {'C','D','E',...}) for a key."""
-    tonic = key_str.replace("b", "-")  # music21 uses '-' for flats
-    if mode == "major":
-        sc = m21scale.MajorScale(tonic)
-    elif mode == "minor":
-        sc = m21scale.MinorScale(tonic)
-    else:
-        sc = m21scale.MajorScale(tonic)
-    return {p.name for p in sc.getPitches(f"{tonic}4", f"{tonic}5")}
-
-
-def try_parse_chord(chord_str: str) -> Optional[harmony.ChordSymbol]:
-    """Attempt to parse a chord symbol; return None on failure."""
-    try:
-        c = harmony.ChordSymbol(chord_str)
-        # Trigger full resolution so errors surface now
-        _ = c.pitches
-        return c
-    except Exception:
-        return None
-
-
-def validate(
-    chords: list[str],
-    key_str: str,
-    mode: str,
-    num_bars: int,
-    style: str,
-) -> tuple[list[str], float, dict]:
-    """
-    Run all reward checks. Returns (errors, reward_score ∈ [0,1], breakdown).
-
-    Reward breakdown:
-        0.00  → unparseable / wrong length (hard gate)
-        +0.50  → key conformance score (fraction of chords with diatonic root)
-        +0.30  → style score
-        +0.20  → voice-leading smoothness
-    """
-    errors: list[str] = []
-    breakdown = {"key": 0.0, "style": 0.0, "voice": 0.0}
-
-    # ── Hard gate 1: length ──────────────────────────────────────────────────
-    if len(chords) != num_bars:
-        errors.append(f"Length mismatch: expected {num_bars}, got {len(chords)}")
-        return errors, 0.0, breakdown
-
-    # ── Hard gate 2: parseability ────────────────────────────────────────────
-    parsed = []
-    for c in chords:
-        obj = try_parse_chord(c)
-        if obj is None:
-            errors.append(f"Unparseable chord: '{c}'")
-        parsed.append(obj)
-
-    if any(p is None for p in parsed):
-        return errors, 0.1, breakdown  # partial credit — at least right length
-
-    # ── Soft reward 1: key conformance (weight 0.5) ──────────────────────────
-    scale_pitches = get_scale_pitch_names(key_str, mode)
-    diatonic_count = sum(
-        1 for c in parsed if c.root().name in scale_pitches
-    )
-    r_key = diatonic_count / len(parsed)
-
-    non_diatonic = [
-        chords[i] for i, c in enumerate(parsed)
-        if c.root().name not in scale_pitches
-    ]
-    if non_diatonic:
-        errors.append(
-            f"Non-diatonic roots ({len(non_diatonic)}/{num_bars}): {non_diatonic}"
+    def best(self) -> GenerationResult:
+        """Highest-reward run across the entire grid."""
+        return max(
+            (r for c in self.cells for r in c.batch.results),
+            key=lambda r: r.reward,
         )
-
-    # ── Soft reward 2: style score (weight 0.3) ──────────────────────────────
-    r_style = _style_score(parsed, chords, style)
-
-    # ── Soft reward 3: voice leading (weight 0.2) ────────────────────────────
-    r_voice = _voice_leading_score(parsed)
-
-    reward = (r_key * 0.5) + (r_style * 0.3) + (r_voice * 0.2)
-    breakdown = {
-        "key": round(r_key, 3),
-        "style": round(r_style, 3),
-        "voice": round(r_voice, 3),
-    }
-    return errors, round(reward, 3), breakdown
-
-
-def _style_score(parsed: list, chord_strs: list[str], style: str) -> float:
-    """Heuristic style match score [0,1]."""
-    if style == "jazz" or style == "bossa":
-        # Reward 7th+ chords
-        extended = sum(
-            1 for c in parsed
-            if any(q in c.commonName for q in ["seventh", "ninth", "eleventh"])
-        )
-        return min(extended / max(len(parsed) * 0.6, 1), 1.0)
-
-    elif style == "blues":
-        # Reward dominant 7ths
-        dom7 = sum(
-            1 for c in parsed
-            if "dominant" in c.commonName and "seventh" in c.commonName
-        )
-        return min(dom7 / max(len(parsed) * 0.5, 1), 1.0)
-
-    elif style in ("pop", "folk"):
-        # Reward simple triads / no extensions
-        simple = sum(
-            1 for c in parsed
-            if len(c.pitches) <= 4
-        )
-        return simple / len(parsed)
-
-    return 0.5  # unknown style — neutral
-
-
-def _voice_leading_score(parsed: list) -> float:
-    """Score smoothness of root motion [0,1]. Smaller intervals = higher score."""
-    if len(parsed) < 2:
-        return 1.0
-    intervals = []
-    for a, b in zip(parsed, parsed[1:]):
-        semitones = abs(a.root().midi - b.root().midi) % 12
-        semitones = min(semitones, 12 - semitones)  # fold to [0,6]
-        intervals.append(semitones)
-    # 0 semitones = 1.0, 6 semitones = 0.0
-    avg = sum(intervals) / len(intervals)
-    return round(1.0 - (avg / 6.0), 3)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -591,6 +496,76 @@ def generate_batch(
             print("\n(no valid run to save)")
 
     return batch
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grid sweep
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_grid(
+    keys: list[str] = ("C",),
+    modes: list[str] = ("major",),
+    styles: list[str] = ("jazz",),
+    num_bars: list[int] = (8,),
+    samples_per_cell: int = 5,
+    model_id: str = MODEL_ID,
+    temperature: float = 0.7,
+    max_new_tokens: int = 256,
+    verbose: bool = True,
+) -> GridResult:
+    """
+    Sweep over the Cartesian product of (keys × modes × styles × num_bars),
+    drawing `samples_per_cell` samples per combination. Returns a GridResult
+    with per-cell BatchResults and overall aggregates.
+
+    No per-run artifacts are written — this is for evaluation, not listening.
+    Use batch.best() / grid.best() and render that one if you want audio.
+    """
+    cells: list[GridCell] = []
+    combos = list(itertools.product(keys, modes, styles, num_bars))
+
+    for i, (k, m, s, nb) in enumerate(combos, 1):
+        if verbose:
+            print(f"\n══ Cell {i}/{len(combos)}: key={k} mode={m} style={s} bars={nb} ══")
+        batch = generate_batch(
+            n=samples_per_cell,
+            key=k, mode=m, style=s, num_bars=nb,
+            model_id=model_id,
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
+            verbose=verbose,
+        )
+        cells.append(GridCell(key=k, mode=m, style=s, num_bars=nb, batch=batch))
+
+    # Overall aggregates across every run in every cell
+    all_results = [r for c in cells for r in c.batch.results]
+    rewards = [r.reward for r in all_results]
+    overall_pass_rate = round(sum(r.valid for r in all_results) / len(all_results), 3)
+    overall_mean_reward = round(statistics.fmean(rewards), 3)
+
+    breakdowns = [r.reward_breakdown for r in all_results if r.reward_breakdown]
+    if breakdowns:
+        overall_mean_breakdown = {
+            k: round(statistics.fmean(b[k] for b in breakdowns), 3)
+            for k in ("key", "style", "voice")
+        }
+    else:
+        overall_mean_breakdown = {"key": 0.0, "style": 0.0, "voice": 0.0}
+
+    grid = GridResult(
+        cells=cells,
+        n_cells=len(cells),
+        samples_per_cell=samples_per_cell,
+        overall_pass_rate=overall_pass_rate,
+        overall_mean_reward=overall_mean_reward,
+        overall_mean_breakdown=overall_mean_breakdown,
+    )
+
+    if verbose:
+        print()
+        print(grid.format_report())
+
+    return grid
 
 
 # ─────────────────────────────────────────────────────────────────────────────
