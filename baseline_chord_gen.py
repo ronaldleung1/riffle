@@ -21,6 +21,7 @@ Usage (Colab):
 
 import json
 import re
+import statistics
 from dataclasses import dataclass
 from typing import Optional
 
@@ -54,7 +55,7 @@ CHORD_ALIASES = {
     "m":   "m",
 }
 
-MIDI_TEMPO    = 80   # BPM
+MIDI_TEMPO    = 120   # BPM
 BEATS_PER_BAR = 4
 VELOCITY      = 75
 
@@ -74,6 +75,18 @@ class GenerationResult:
     midi_path: Optional[str]
     mp3_path: Optional[str] = None
     report_path: Optional[str] = None
+    reward_breakdown: Optional[dict] = None
+
+    def play(self):
+        """Display an inline audio player in Jupyter/Colab."""
+        if self.mp3_path is None:
+            print("No MP3 available.")
+            return
+        try:
+            from IPython.display import Audio, display
+            display(Audio(self.mp3_path))
+        except ImportError:
+            print(f"IPython not available. MP3 saved to: {self.mp3_path}")
 
     def format_report(self) -> str:
         lines = [
@@ -96,6 +109,42 @@ class GenerationResult:
             "─────────────────────────────────────────────────────",
         ]
         return "\n".join(lines)
+
+
+@dataclass
+class BatchResult:
+    results: list[GenerationResult]
+    n: int
+    pass_rate: float
+    mean_reward: float
+    std_reward: float
+    median_reward: float
+    min_reward: float
+    max_reward: float
+    mean_breakdown: dict  # {"key": mean, "style": mean, "voice": mean}
+
+    def format_report(self) -> str:
+        lines = [
+            "══ Batch Report ════════════════════════════════════",
+            f"Runs       : {self.n}",
+            f"Pass rate  : {self.pass_rate:.0%}  ({sum(r.valid for r in self.results)}/{self.n})",
+            f"Reward     : mean={self.mean_reward:.3f}  std={self.std_reward:.3f}  "
+            f"median={self.median_reward:.3f}  min={self.min_reward:.3f}  max={self.max_reward:.3f}",
+            f"Breakdown  : key={self.mean_breakdown['key']:.3f}  "
+            f"style={self.mean_breakdown['style']:.3f}  "
+            f"voice={self.mean_breakdown['voice']:.3f}",
+            "── Per-run ──────────────────────────────────────────",
+        ]
+        for i, r in enumerate(self.results):
+            mark = "✓" if r.valid else "✗"
+            chords_str = " ".join(r.chords) if r.chords else "<unparsed>"
+            lines.append(f"  [{i+1:>2}] {mark} reward={r.reward:.3f}  {chords_str}")
+        lines.append("════════════════════════════════════════════════════")
+        return "\n".join(lines)
+
+    def best(self) -> GenerationResult:
+        """Return the result with the highest reward."""
+        return max(self.results, key=lambda r: r.reward)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,9 +220,9 @@ def validate(
     mode: str,
     num_bars: int,
     style: str,
-) -> tuple[list[str], float]:
+) -> tuple[list[str], float, dict]:
     """
-    Run all reward checks. Returns (errors, reward_score ∈ [0,1]).
+    Run all reward checks. Returns (errors, reward_score ∈ [0,1], breakdown).
 
     Reward breakdown:
         0.00  → unparseable / wrong length (hard gate)
@@ -182,11 +231,12 @@ def validate(
         +0.20  → voice-leading smoothness
     """
     errors: list[str] = []
+    breakdown = {"key": 0.0, "style": 0.0, "voice": 0.0}
 
     # ── Hard gate 1: length ──────────────────────────────────────────────────
     if len(chords) != num_bars:
         errors.append(f"Length mismatch: expected {num_bars}, got {len(chords)}")
-        return errors, 0.0
+        return errors, 0.0, breakdown
 
     # ── Hard gate 2: parseability ────────────────────────────────────────────
     parsed = []
@@ -197,7 +247,7 @@ def validate(
         parsed.append(obj)
 
     if any(p is None for p in parsed):
-        return errors, 0.1  # partial credit — at least right length
+        return errors, 0.1, breakdown  # partial credit — at least right length
 
     # ── Soft reward 1: key conformance (weight 0.5) ──────────────────────────
     scale_pitches = get_scale_pitch_names(key_str, mode)
@@ -222,7 +272,12 @@ def validate(
     r_voice = _voice_leading_score(parsed)
 
     reward = (r_key * 0.5) + (r_style * 0.3) + (r_voice * 0.2)
-    return errors, round(reward, 3)
+    breakdown = {
+        "key": round(r_key, 3),
+        "style": round(r_style, 3),
+        "voice": round(r_voice, 3),
+    }
+    return errors, round(reward, 3), breakdown
 
 
 def _style_score(parsed: list, chord_strs: list[str], style: str) -> float:
@@ -338,18 +393,22 @@ def generate(
     mode: str = "major",
     style: str = "jazz",
     num_bars: int = 8,
-    output_midi_path: str = "output.mid",
+    output_midi_path: Optional[str] = "output.mid",
     output_mp3_path: Optional[str] = None,
     output_report_path: Optional[str] = None,
     model_id: str = MODEL_ID,
     temperature: float = 0.7,
     max_new_tokens: int = 256,
+    quiet: bool = False,
 ) -> GenerationResult:
     """
     Generate and validate a chord progression using Qwen3.5-2B.
 
     Returns a GenerationResult with validation details and reward score.
-    If valid (reward > 0.5 and correct length), writes MIDI and optionally MP4/report.
+    If valid (reward > 0.5 and correct length), writes MIDI and optionally MP3/report.
+
+    Set quiet=True to suppress printing and auto-playback (useful for batch runs).
+    Pass output_midi_path=None to skip writing MIDI even when valid.
     """
     model, tokenizer = load_model(model_id)
 
@@ -393,22 +452,25 @@ def generate(
         )
 
     # Validate
-    errors, reward = validate(chords, key, mode, num_bars, style)
+    errors, reward, breakdown = validate(chords, key, mode, num_bars, style)
     valid = reward > 0.5 and len(chords) == num_bars
 
     # Render MIDI only if valid
     midi_path = None
     mp3_path = None
-    if valid:
+    if valid and output_midi_path:
         render_midi(chords, output_midi_path)
         midi_path = output_midi_path
-        print(f"✓ Valid progression! MIDI saved to: {output_midi_path}")
+        if not quiet:
+            print(f"✓ Valid progression! MIDI saved to: {output_midi_path}")
         if output_mp3_path:
             render_mp3(output_midi_path, output_mp3_path)
             mp3_path = output_mp3_path
-            print(f"✓ MP4 saved to: {output_mp3_path}")
-    else:
-        print(f"✗ Invalid progression (reward={reward}). No MIDI generated.")
+            if not quiet:
+                print(f"✓ MP3 saved to: {output_mp3_path}")
+    elif not quiet:
+        if not valid:
+            print(f"✗ Invalid progression (reward={reward}). No MIDI generated.")
 
     result = GenerationResult(
         prompt=prompt,
@@ -419,16 +481,116 @@ def generate(
         reward=reward,
         midi_path=midi_path,
         mp3_path=mp3_path,
+        reward_breakdown=breakdown,
     )
 
+    if not quiet and result.mp3_path:
+        result.play()
+
     report = result.format_report()
-    print(report)
+    if not quiet:
+        print(report)
     if output_report_path:
         with open(output_report_path, "w") as f:
             f.write(report)
         result.report_path = output_report_path
 
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Batch generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_batch(
+    n: int,
+    key: str = "C",
+    mode: str = "major",
+    style: str = "jazz",
+    num_bars: int = 8,
+    model_id: str = MODEL_ID,
+    temperature: float = 0.7,
+    max_new_tokens: int = 256,
+    save_best_midi: Optional[str] = None,
+    save_best_mp3: Optional[str] = None,
+    verbose: bool = True,
+) -> BatchResult:
+    """
+    Generate `n` chord progressions with identical settings and aggregate scores.
+
+    By default, no per-run artifacts are written. Pass `save_best_midi` /
+    `save_best_mp3` to render only the highest-reward run after the loop.
+    """
+    results: list[GenerationResult] = []
+    for i in range(n):
+        if verbose:
+            print(f"[{i+1}/{n}] generating ...", end=" ", flush=True)
+        r = generate(
+            key=key,
+            mode=mode,
+            style=style,
+            num_bars=num_bars,
+            output_midi_path=None,
+            output_mp3_path=None,
+            output_report_path=None,
+            model_id=model_id,
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
+            quiet=True,
+        )
+        results.append(r)
+        if verbose:
+            mark = "✓" if r.valid else "✗"
+            print(f"{mark} reward={r.reward:.3f}  {r.chords}")
+
+    rewards = [r.reward for r in results]
+    pass_rate = sum(r.valid for r in results) / n
+    mean_reward = statistics.fmean(rewards)
+    std_reward = statistics.pstdev(rewards) if n > 1 else 0.0
+    median_reward = statistics.median(rewards)
+
+    breakdowns = [r.reward_breakdown for r in results if r.reward_breakdown]
+    if breakdowns:
+        mean_breakdown = {
+            k: round(statistics.fmean(b[k] for b in breakdowns), 3)
+            for k in ("key", "style", "voice")
+        }
+    else:
+        mean_breakdown = {"key": 0.0, "style": 0.0, "voice": 0.0}
+
+    batch = BatchResult(
+        results=results,
+        n=n,
+        pass_rate=pass_rate,
+        mean_reward=round(mean_reward, 3),
+        std_reward=round(std_reward, 3),
+        median_reward=round(median_reward, 3),
+        min_reward=min(rewards),
+        max_reward=max(rewards),
+        mean_breakdown=mean_breakdown,
+    )
+
+    if verbose:
+        print(batch.format_report())
+
+    # Optionally render the best run
+    if save_best_midi:
+        best = batch.best()
+        if best.chords and best.valid:
+            render_midi(best.chords, save_best_midi)
+            best.midi_path = save_best_midi
+            if verbose:
+                print(f"\n★ Best run (reward={best.reward}) → {save_best_midi}")
+            if save_best_mp3:
+                render_mp3(save_best_midi, save_best_mp3)
+                best.mp3_path = save_best_mp3
+                if verbose:
+                    print(f"★ Best MP3 → {save_best_mp3}")
+                    best.play()
+        elif verbose:
+            print("\n(no valid run to save)")
+
+    return batch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
