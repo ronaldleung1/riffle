@@ -1,0 +1,15 @@
+# riffle — chord progression generator
+# Loose pins: tight enough to stay reproducible, loose enough to ride Colab base-image updates.
+# `torch` is intentionally NOT pinned — Colab ships a CUDA-matched build; let it win.
+
+# Model stack
+transformers>=4.51,<5.0
+accelerate>=0.34
+sympy==1.13.1            # pinned: Colab's `pip install transformers` can leave sympy in a partial state
+                         # → `AttributeError: module 'sympy' has no attribute 'core'` (fix: reinstall, then pin)
+
+# Music / audio
+music21>=9.1,<10.0
+midiutil>=1.2.1,<2.0
+midi2audio>=0.1.1
+pydub>=0.25.1
