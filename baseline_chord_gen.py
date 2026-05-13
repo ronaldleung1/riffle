@@ -28,17 +28,24 @@ from typing import Optional
 from music21 import harmony
 from midiutil import MIDIFile
 
-# ── model libs ───────────────────────────────────────────────────────────────
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
+# ── model libs (lazy-loaded inside load_model / generate*) ──────────────────
+# Heavy deps (torch, transformers) are not imported at module load so that
+# this file can be imported for its dataclasses, render helpers, and tests
+# without paying the model-stack import cost.
 
 # ── reward primitives (model-free, also used by RL trainer) ──────────────────
 from chord_rewards import (
     STYLE_DESCRIPTIONS,
     build_prompt,
+    build_prompt_sectional,
     parse_chord_list,
+    parse_sectional_progression,
     validate,
+    validate_sectional,
 )
+
+# ── notation adapter ──────────────────────────────────────────────────────────
+from data.notation import to_music21
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +100,62 @@ class GenerationResult:
             lines.append(f"MIDI    : {self.midi_path}")
         if self.mp3_path:
             lines.append(f"MP3     : {self.mp3_path}")
+        lines += [
+            "── Prompt ───────────────────────────────────────────",
+            self.prompt,
+            "── Raw Output ───────────────────────────────────────",
+            self.raw_output,
+            "─────────────────────────────────────────────────────",
+        ]
+        return "\n".join(lines)
+
+
+@dataclass
+class GenerationResultSectional:
+    prompt: str
+    raw_output: str
+    requested_sections: list[str]
+    parsed_sections: list | None       # list of (name, idx, [chords]) tuples, or None if parse failed
+    valid: bool
+    reward: float
+    errors: list[str]
+    breakdown: dict
+    midi_path: Optional[str] = None
+    mp3_path: Optional[str] = None
+    report_path: Optional[str] = None
+
+    def play(self):
+        """Display an inline audio player in Jupyter/Colab."""
+        if self.mp3_path is None:
+            print("No MP3 available.")
+            return
+        try:
+            from IPython.display import Audio, display
+            display(Audio(self.mp3_path))
+        except ImportError:
+            print(f"IPython not available. MP3 saved to: {self.mp3_path}")
+
+    def format_report(self) -> str:
+        lines = [
+            "── Sectional Chord Progression Report ────────────────",
+            f"Sections: {self.requested_sections}",
+            f"Valid    : {self.valid}",
+            f"Reward   : {self.reward}",
+        ]
+        if self.errors:
+            lines.append(f"Errors   : {self.errors}")
+        if self.midi_path:
+            lines.append(f"MIDI     : {self.midi_path}")
+        if self.mp3_path:
+            lines.append(f"MP3      : {self.mp3_path}")
+        lines += [
+            "── Parsed Sections ──────────────────────────────────",
+        ]
+        if self.parsed_sections:
+            for name, idx, chords in self.parsed_sections:
+                lines.append(f"  {name}_{idx}: {chords}")
+        else:
+            lines.append("  <unparsed>")
         lines += [
             "── Prompt ───────────────────────────────────────────",
             self.prompt,
@@ -278,6 +341,8 @@ _tokenizer = None
 def load_model(model_id: str = MODEL_ID):
     global _model, _tokenizer
     if _model is None:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
         print(f"Loading {model_id} ...")
         _tokenizer = AutoTokenizer.from_pretrained(model_id)
         _model = AutoModelForCausalLM.from_pretrained(
@@ -287,6 +352,37 @@ def load_model(model_id: str = MODEL_ID):
         )
         print("Model loaded.")
     return _model, _tokenizer
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sectional helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _flatten_sections(parsed_sections: list) -> list[str]:
+    """Flatten [(name, idx, chords), ...] into a single ordered chord list."""
+    return [c for (_, _, chords) in parsed_sections for c in chords]
+
+
+def _render_sectional_audio(
+    parsed_sections: list,
+    output_midi_path: str,
+    output_mp3_path: Optional[str],
+    quiet: bool,
+) -> tuple[Optional[str], Optional[str]]:
+    """Flatten sections, convert notation, write MIDI + optionally MP3."""
+    flat_chords = _flatten_sections(parsed_sections)
+    music21_chords = [to_music21(chord) for chord in flat_chords]
+    render_midi(music21_chords, output_midi_path)
+    if not quiet:
+        print(f"✓ Valid progression! MIDI saved to: {output_midi_path}")
+
+    mp3_path = None
+    if output_mp3_path:
+        render_mp3(output_midi_path, output_mp3_path)
+        mp3_path = output_mp3_path
+        if not quiet:
+            print(f"✓ MP3 saved to: {output_mp3_path}")
+    return output_midi_path, mp3_path
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,6 +423,7 @@ def generate(
         add_generation_prompt=True,
         enable_thinking=False,   # disable <think> mode
     )
+    import torch
     inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
     with torch.no_grad():
@@ -387,6 +484,96 @@ def generate(
         midi_path=midi_path,
         mp3_path=mp3_path,
         reward_breakdown=breakdown,
+    )
+
+    if not quiet and result.mp3_path:
+        result.play()
+
+    report = result.format_report()
+    if not quiet:
+        print(report)
+    if output_report_path:
+        with open(output_report_path, "w") as f:
+            f.write(report)
+        result.report_path = output_report_path
+
+    return result
+
+
+def generate_sectional(
+    style: str,
+    sections: list[str],
+    output_midi_path: Optional[str] = None,
+    output_mp3_path: Optional[str] = None,
+    output_report_path: Optional[str] = None,
+    model_id: str = MODEL_ID,
+    temperature: float = 0.7,
+    max_new_tokens: int = 512,
+    quiet: bool = False,
+) -> GenerationResultSectional:
+    """
+    Generate and validate a sectional chord progression using Qwen3.5-2B.
+
+    Returns a GenerationResultSectional with validation details and reward score.
+    If valid (reward > 0.5 and no errors), writes MIDI and optionally MP3/report.
+
+    Set quiet=True to suppress printing and auto-playback (useful for batch runs).
+    Pass output_midi_path=None to skip writing MIDI even when valid.
+    """
+    model, tokenizer = load_model(model_id)
+
+    # Build prompt
+    prompt = build_prompt_sectional(style, sections)
+    messages = [{"role": "user", "content": prompt}]
+
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,   # disable <think> mode
+    )
+    import torch
+    inputs = tokenizer([text], return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=True,
+            top_p=0.9,
+        )
+
+    # Decode only the new tokens
+    new_ids = output_ids[0][inputs.input_ids.shape[1]:]
+    raw_output = tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+
+    # Parse and validate
+    errors, reward, breakdown = validate_sectional(raw_output, sections)
+    parsed_sections = parse_sectional_progression(raw_output)
+    valid = reward > 0.5 and len(errors) == 0
+
+    # Render MIDI only if valid
+    midi_path = None
+    mp3_path = None
+    if valid and parsed_sections and output_midi_path:
+        midi_path, mp3_path = _render_sectional_audio(
+            parsed_sections["sections"], output_midi_path, output_mp3_path, quiet
+        )
+    elif not quiet and not valid:
+        print(f"✗ Invalid progression (reward={reward}). No MIDI generated.")
+
+    result = GenerationResultSectional(
+        prompt=prompt,
+        raw_output=raw_output,
+        requested_sections=sections,
+        parsed_sections=parsed_sections["sections"] if parsed_sections else None,
+        valid=valid,
+        reward=reward,
+        errors=errors,
+        breakdown=breakdown,
+        midi_path=midi_path,
+        mp3_path=mp3_path,
     )
 
     if not quiet and result.mp3_path:
