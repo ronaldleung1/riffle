@@ -39,7 +39,7 @@ def main():
 
     for genre, count in genre_counts.most_common(15):
         pct = 100.0 * count / total
-        print(f"{genre:20s} {count:6d}  {pct:5.1f}%")
+        print(f"{str(genre):20s} {count:6d}  {pct:5.1f}%")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Section-tag distribution
