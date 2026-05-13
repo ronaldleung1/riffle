@@ -24,6 +24,7 @@ import random
 import re
 import sys
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -76,8 +77,14 @@ def parse_song_sections(chord_str: str) -> Optional[list]:
     return sections or None
 
 
+@lru_cache(maxsize=4096)
 def is_parseable(chord: str) -> bool:
-    """Check whether a chord can be understood by music21 (after notation adapter)."""
+    """Check whether a chord can be understood by music21 (after notation adapter).
+
+    Cached because music21 parsing is the build's hot spot and the dataset's
+    chord vocabulary is small (~hundreds of symbols across hundreds of thousands
+    of songs).
+    """
     return try_parse_chord(to_music21(chord)) is not None
 
 
@@ -185,7 +192,9 @@ def run_sanity_check(sample_size: int, seed: int) -> None:
     reject_reasons = Counter()
     style_counts = Counter()
 
-    for row in _iter_rows(dataset, sample_size, seed):
+    from tqdm import tqdm
+    for row in tqdm(_iter_rows(dataset, sample_size, seed),
+                    total=sample_size, desc="filtering", unit="row"):
         example, reason = _row_to_example(row)
         if example is None:
             reject_reasons[reason] += 1
@@ -219,7 +228,10 @@ def build_splits(out_dir: Path, max_per_style: int, seed: int) -> None:
     by_style: dict[str, list[dict]] = {}
     reject_reasons = Counter()
 
-    for row in dataset:
+    # tqdm ships transitively with `datasets`; this gives Colab a heartbeat so
+    # the full ~680k-row pass doesn't look stuck.
+    from tqdm import tqdm
+    for row in tqdm(dataset, total=len(dataset), desc="filtering", unit="row"):
         example, reason = _row_to_example(row)
         if example is None:
             reject_reasons[reason] += 1
