@@ -1,12 +1,12 @@
 """
-sft_train.py — Supervised fine-tune Qwen3.5-0.5B on Chordonomicon sectional data.
+sft_train.py — Supervised fine-tune Qwen3.5-0.8B on Chordonomicon sectional data.
 
 Usage (Colab or local):
     python sft_train.py \
         --train data/chordonomicon_train.jsonl \
         --val   data/chordonomicon_val.jsonl \
         --out   riffle-sft \
-        --model Qwen/Qwen3.5-0.5B \
+        --model Qwen/Qwen3.5-0.8B \
         --epochs 1 \
         --batch-size 8
 
@@ -48,7 +48,7 @@ def main():
     parser.add_argument("--train", required=True, help="Path to train JSONL")
     parser.add_argument("--val", default=None, help="Path to val JSONL (optional)")
     parser.add_argument("--out", default="riffle-sft", help="Output checkpoint dir")
-    parser.add_argument("--model", default="Qwen/Qwen3.5-0.5B", help="Base model ID")
+    parser.add_argument("--model", default="Qwen/Qwen3.5-0.8B", help="Base model ID")
     parser.add_argument("--epochs", type=float, default=1.0)
     parser.add_argument("--batch-size", type=int, default=8, help="Per-device batch size")
     parser.add_argument("--grad-accum", type=int, default=2, help="Gradient accumulation steps")
