@@ -127,12 +127,8 @@ class TestMapGenre:
     def test_main_genre_rock(self):
         assert map_genre({"main_genre": "rock"}) == "rock"
 
-    def test_blues_via_genres_tag(self):
-        assert map_genre({"main_genre": "alternative", "genres": "delta blues, slide"}) == "blues"
-
-    def test_blues_via_genres_list(self):
-        assert map_genre({"main_genre": "rock", "genres": ["blues rock", "indie"]}) == "rock"
-        # main_genre wins over blues detection
+    def test_main_genre_blues_dropped(self):
+        assert map_genre({"main_genre": "blues", "genres": "electric blues"}) is None
 
     def test_unsupported_genre_dropped(self):
         assert map_genre({"main_genre": "metal", "genres": ""}) is None

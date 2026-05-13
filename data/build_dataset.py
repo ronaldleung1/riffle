@@ -55,7 +55,6 @@ GENRE_TO_STYLE = {
     "country": "country",
     "soul": "soul",
 }
-# `blues` is detected via the `genres` tag substring instead of main_genre.
 
 SECTION_RE = re.compile(r"<(\w+?)_(\d+)>\s*([^<]+)")
 
@@ -114,12 +113,6 @@ def map_genre(row: dict) -> Optional[str]:
     main_genre = (row.get("main_genre") or "").lower()
     if main_genre in GENRE_TO_STYLE:
         return GENRE_TO_STYLE[main_genre]
-    # `blues` detection via genres tag list / string.
-    genres = row.get("genres") or ""
-    if isinstance(genres, list):
-        genres = " ".join(genres)
-    if "blues" in str(genres).lower():
-        return "blues"
     return None
 
 
