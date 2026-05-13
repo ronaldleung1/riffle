@@ -2,7 +2,16 @@
 
 import random
 import statistics
+import sys
 from collections import Counter
+from pathlib import Path
+
+# Allow `python scripts/explore_chordonomicon.py` from anywhere — see note in
+# data/build_dataset.py.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from datasets import load_dataset
 from chord_rewards import parse_sectional_progression
 

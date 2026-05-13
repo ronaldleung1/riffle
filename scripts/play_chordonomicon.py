@@ -8,7 +8,16 @@ Usage in Jupyter/Colab:
 
 import os
 import random
+import sys
 import tempfile
+from pathlib import Path
+
+# Allow `python scripts/play_chordonomicon.py` from anywhere — see note in
+# data/build_dataset.py.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from datasets import load_dataset
 from chord_rewards import parse_sectional_progression
 from data.notation import to_music21

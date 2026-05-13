@@ -22,9 +22,17 @@ import json
 import os
 import random
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Iterable, Optional
+
+# When invoked as `python data/build_dataset.py`, Python sets `data/` (not the
+# repo root) as sys.path[0], which breaks `from chord_rewards import ...`.
+# Prepend the repo root so the script works regardless of CWD or invocation.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from chord_rewards import build_prompt_sectional, try_parse_chord
 from data.notation import to_music21
