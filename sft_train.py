@@ -68,6 +68,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    import torch
+    if not args.bf16 and torch.cuda.is_bf16_supported():
+        args.bf16 = True
+
     from unsloth import FastLanguageModel
     from trl import SFTConfig, SFTTrainer
 
@@ -134,7 +138,6 @@ def main():
         eval_steps=args.save_steps if eval_ds else None,
         dataset_text_field="text",
         max_length=args.max_len,
-        completion_only_loss=True,
         report_to=[],
         seed=args.seed,
     )

@@ -99,6 +99,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    import torch
+    if not args.bf16 and torch.cuda.is_bf16_supported():
+        args.bf16 = True
+
     from unsloth import FastLanguageModel
     from vllm import SamplingParams
     from trl import GRPOConfig, GRPOTrainer
