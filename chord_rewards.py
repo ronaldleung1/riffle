@@ -369,7 +369,9 @@ def validate_sectional(
         A tuple ``(errors, reward, breakdown)`` where:
 
         * ``errors`` is a list of human-readable error strings (may be empty).
-        * ``reward`` is a float in ``[0.0, 1.0]``.
+        * ``reward`` is a float in ``[0.0, 1.0]`` — equals compliance
+          (0.5·presence + 0.5·order).  Gaming stats are tracked in the
+          breakdown but do not affect the reward.
         * ``breakdown`` is a dict with keys ``presence``, ``order``,
           ``compliance``, ``max_jaccard``, and ``gamed``.
     """
@@ -399,13 +401,14 @@ def validate_sectional(
     r_order = _lcs(requested_names_seq, output_names_seq) / len(requested_names_seq)
     r_compliance = 0.5 * r_presence + 0.5 * r_order
 
-    # 3. Gaming detection via cross-section Jaccard
+    # 3. Gaming stats — monitored but NOT applied to reward.
+    # Jaccard penalises chorus≈chorus which is musically valid; reintroduce
+    # a calibrated term later if ablations show it helps.
     max_jac = _section_max_jaccard(parsed["sections"])
     gamed = max_jac > 0.9
-    gaming_penalty = 1.0 if gamed else 0.0
 
-    # 4. Final reward
-    reward = r_compliance * (1 - gaming_penalty)
+    # 4. Final reward = compliance only
+    reward = r_compliance
 
     # 5. Error list
     errors: list[str] = []
