@@ -243,19 +243,28 @@ def build_prompt_sectional(style: str, sections: list[str]) -> str:
         A prompt string with XML-tag format instructions.
     """
     style_hint = STYLE_DESCRIPTIONS.get(style, "")
-    section_list_csv = ", ".join(sections)
+
+    # Build explicit tag labels: repeated names get incremented indices.
+    counts: dict[str, int] = {}
+    tags = []
+    for s in sections:
+        counts[s] = counts.get(s, 0) + 1
+        tags.append(f"<{s}_{counts[s]}>")
+    tag_sequence = " ... ".join(tags)
+
     return (
         f"Generate a song-form chord progression.\n"
         f"Style: {style}. {style_hint}\n"
-        f"Structure: {section_list_csv}.\n"
+        f"\n"
+        f"Output ALL of the following sections in order, using the exact tags shown:\n"
+        f"{tag_sequence}\n"
         f"\n"
         f"Rules:\n"
-        f"- Output the progression using XML-like section tags.\n"
-        f"- Format: <intro_1> C G Am F <verse_1> C F G C ...\n"
-        f"- Each section must contain 2 to 16 chords.\n"
-        f"- Use chord symbols where 's' is sharp and 'b' is flat (e.g., Fs7, Bb, Cmin7/Fs).\n"
-        f"- Sections must appear in the order listed above.\n"
-        f"- Do not include any explanation, just the tagged chord sequence.\n"
+        f"- Each section tag is followed immediately by its chord symbols.\n"
+        f"- Each section must contain 4 to 16 chord symbols.\n"
+        f"- Use chord names only — no slash repeats, no bar lines.\n"
+        f"- Use 's' for sharp and 'b' for flat (e.g., Fs7, Bb, Cmin7/Fs).\n"
+        f"- Output all sections in one response. No explanation.\n"
         f"/no_think"
     )
 
@@ -281,7 +290,9 @@ def parse_sectional_progression(raw: str) -> dict | None:
         name = match.group(1).lower()
         index = int(match.group(2))
         raw_chords = match.group(3).split()
-        chords = [to_chordonomicon(token) for token in raw_chords if token.strip()]
+        # Filter '/' (repeat-bar notation) — not a chord symbol.
+        chords = [to_chordonomicon(token) for token in raw_chords
+                  if token.strip() and token != '/']
         sections.append((name, index, chords))
 
     # Return None if nothing was found or all chord lists are empty
