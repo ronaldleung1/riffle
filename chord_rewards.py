@@ -21,17 +21,23 @@ from typing import Optional
 
 from music21 import harmony, scale as m21scale
 
+from data.notation import to_chordonomicon
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
 STYLE_DESCRIPTIONS = {
-    "jazz":   "Use 7th chords, 9th chords, and ii-V-I progressions. Aim for harmonic complexity.",
-    "pop":    "Use mostly I, IV, V, vi chords. Keep it simple and singable.",
-    "blues":  "Use dominant 7th chords on I, IV, and V. Follow 12-bar blues conventions.",
-    "folk":   "Use simple triads — I, IV, V, and maybe ii or vi. Keep it diatonic.",
-    "bossa":  "Similar to jazz but favour maj7, min7, dom7 chords with smooth voice leading.",
+    "jazz":       "Use 7th chords, 9th chords, and ii-V-I progressions. Aim for harmonic complexity.",
+    "pop":        "Use mostly I, IV, V, vi chords. Keep it simple and singable.",
+    "blues":      "Use dominant 7th chords on I, IV, and V. Follow 12-bar blues conventions.",
+    "folk":       "Use simple triads — I, IV, V, and maybe ii or vi. Keep it diatonic.",
+    "bossa":      "Similar to jazz but favour maj7, min7, dom7 chords with smooth voice leading.",
+    "rock":       "Riff-driven, power-chord-friendly, often I-bVII-IV motion.",
+    "country":    "Mostly diatonic triads, I-IV-V dominant, occasional sus4.",
+    "soul":       "Extended chords, secondary dominants, smooth voice leading.",
+    "electronic": "Loopable, repetitive, often modal or pedal-tone-based.",
 }
 
 # Chords music21 struggles to parse — map them to equivalents
@@ -214,3 +220,193 @@ def validate(
         "voice": round(r_voice, 3),
     }
     return errors, round(reward, 3), breakdown
+
+
+# --- Sectional Mode (RLVR) ---
+
+def build_prompt_sectional(style: str, sections: list[str]) -> str:
+    """Build a prompt for sectional chord-progression generation.
+
+    Args:
+        style: Genre/style name (e.g. 'rock', 'pop').
+        sections: Ordered list of section names without index suffixes
+                  (e.g. ['intro', 'verse', 'chorus', 'verse', 'chorus', 'outro']).
+
+    Returns:
+        A prompt string with XML-tag format instructions.
+    """
+    style_hint = STYLE_DESCRIPTIONS.get(style, "")
+    section_list_csv = ", ".join(sections)
+    return (
+        f"Generate a song-form chord progression.\n"
+        f"Style: {style}. {style_hint}\n"
+        f"Structure: {section_list_csv}.\n"
+        f"\n"
+        f"Rules:\n"
+        f"- Output the progression using XML-like section tags.\n"
+        f"- Format: <intro_1> C G Am F <verse_1> C F G C ...\n"
+        f"- Each section must contain 2 to 16 chords.\n"
+        f"- Use chord symbols where 's' is sharp and 'b' is flat (e.g., Fs7, Bb, Cmin7/Fs).\n"
+        f"- Sections must appear in the order listed above.\n"
+        f"- Do not include any explanation, just the tagged chord sequence.\n"
+        f"/no_think"
+    )
+
+
+def parse_sectional_progression(raw: str) -> dict | None:
+    """Parse sectional chord output into a structured dict.
+
+    Strips ``<think>...</think>`` blocks, then finds ``<name_index>`` tags
+    followed by chord tokens. Each chord token is normalised to Chordonomicon
+    notation via :func:`data.notation.to_chordonomicon`.
+
+    Returns:
+        ``{"sections": [(name, index, [chords]), ...]}`` in parse order,
+        or ``None`` if no valid sections are found.
+    """
+    # Strip think blocks (non-greedy, DOTALL)
+    cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+
+    # Find sections: <name_index> followed by chord tokens
+    pattern = re.compile(r"<(\w+?)_(\d+)>\s*([^<]+)", re.DOTALL)
+    sections = []
+    for match in pattern.finditer(cleaned):
+        name = match.group(1).lower()
+        index = int(match.group(2))
+        raw_chords = match.group(3).split()
+        chords = [to_chordonomicon(token) for token in raw_chords if token.strip()]
+        sections.append((name, index, chords))
+
+    # Return None if nothing was found or all chord lists are empty
+    if not sections or all(len(chords) == 0 for _, _, chords in sections):
+        return None
+
+    return {"sections": sections}
+
+
+def _lcs(a: list, b: list) -> int:
+    """Return the length of the longest common subsequence of two lists.
+
+    Both arguments should be lists of strings (e.g. section names).
+    """
+    m, n = len(a), len(b)
+    # dp[i][j] = LCS length for a[:i], b[:j]
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    return dp[m][n]
+
+
+def _section_max_jaccard(parsed_sections: list) -> float:
+    """Compute the maximum pairwise Jaccard similarity between distinct section types.
+
+    Each distinct section *name* (e.g. 'verse', 'chorus') is collapsed into the
+    union of its chord sets across all instances.  The Jaccard index is then
+    computed for every pair of distinct names, and the maximum is returned.
+
+    Returns:
+        Max Jaccard in [0.0, 1.0].  Returns 0.0 if fewer than 2 distinct names.
+    """
+    # Merge chord sets per section name
+    chord_sets: dict[str, set] = {}
+    for name, _, chords in parsed_sections:
+        chord_sets.setdefault(name, set()).update(chords)
+
+    names = list(chord_sets.keys())
+    if len(names) < 2:
+        return 0.0
+
+    max_jac = 0.0
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a = chord_sets[names[i]]
+            b = chord_sets[names[j]]
+            union = a | b
+            if not union:
+                jac = 0.0
+            else:
+                jac = len(a & b) / len(union)
+            if jac > max_jac:
+                max_jac = jac
+
+    return max_jac
+
+
+def validate_sectional(
+    raw: str,
+    requested_sections: list[str],
+) -> tuple[list[str], float, dict]:
+    """Validate sectional chord output and compute an RLVR reward.
+
+    Args:
+        raw: Raw model output (may contain ``<think>`` blocks).
+        requested_sections: Ordered list of section names as requested in the
+                            prompt (e.g. ``['intro', 'verse', 'chorus']``).
+
+    Returns:
+        A tuple ``(errors, reward, breakdown)`` where:
+
+        * ``errors`` is a list of human-readable error strings (may be empty).
+        * ``reward`` is a float in ``[0.0, 1.0]``.
+        * ``breakdown`` is a dict with keys ``presence``, ``order``,
+          ``compliance``, ``max_jaccard``, and ``gamed``.
+    """
+    # 1. Parse
+    parsed = parse_sectional_progression(raw)
+    if parsed is None:
+        return (
+            ["unparseable: no valid section tags"],
+            0.0,
+            {
+                "presence": 0.0,
+                "order": 0.0,
+                "compliance": 0.0,
+                "max_jaccard": 0.0,
+                "gamed": False,
+            },
+        )
+
+    # 2. Presence and order rewards
+    requested_names_seq = [s.lower() for s in requested_sections]
+    output_names_seq = [name for (name, _, _) in parsed["sections"]]
+
+    requested_set = set(requested_names_seq)
+    output_set = set(output_names_seq)
+
+    r_presence = len(requested_set & output_set) / len(requested_set)
+    r_order = _lcs(requested_names_seq, output_names_seq) / len(requested_names_seq)
+    r_compliance = 0.5 * r_presence + 0.5 * r_order
+
+    # 3. Gaming detection via cross-section Jaccard
+    max_jac = _section_max_jaccard(parsed["sections"])
+    gamed = max_jac > 0.9
+    gaming_penalty = 1.0 if gamed else 0.0
+
+    # 4. Final reward
+    reward = r_compliance * (1 - gaming_penalty)
+
+    # 5. Error list
+    errors: list[str] = []
+    if not requested_set.issubset(output_set):
+        missing = requested_set - output_set
+        errors.append(f"missing sections: {sorted(missing)}")
+    if r_order < 1.0:
+        errors.append("section order does not match request")
+    if gamed:
+        errors.append(f"sections too similar (max Jaccard = {max_jac:.2f})")
+
+    return (
+        errors,
+        reward,
+        {
+            "presence": r_presence,
+            "order": r_order,
+            "compliance": r_compliance,
+            "max_jaccard": max_jac,
+            "gamed": gamed,
+        },
+    )
