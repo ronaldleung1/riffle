@@ -1,0 +1,20 @@
+# riffle — chord progression generator
+#
+# Colab's base image already ships transformers, accelerate, torch, music21,
+# pydub and sympy. We list every direct dep here so a fresh environment can
+# install what's missing, but we leave versions unpinned so pip won't fight
+# Colab and downgrade torch / sympy / etc.
+#
+# If something breaks because of a transformers/torch upgrade, pin that ONE
+# package — don't blanket-pin everything.
+
+transformers
+accelerate
+music21
+midiutil
+midi2audio
+pydub
+datasets
+trl
+# unsloth is installed via its own Colab cell (version depends on CUDA/triton)
+# see training notebook setup cell
