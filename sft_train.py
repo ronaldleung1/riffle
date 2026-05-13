@@ -96,13 +96,20 @@ def main():
     if args.max_train_samples:
         train_rows = train_rows[:args.max_train_samples]
     print(f"  train rows: {len(train_rows)}")
+    def _apply_template(example):
+        return {"text": tokenizer.apply_chat_template(
+            example["messages"], tokenize=False, add_generation_prompt=False
+        )}
+
     train_ds = Dataset.from_list([_to_chat_format(r) for r in train_rows])
+    train_ds = train_ds.map(_apply_template, remove_columns=["messages"])
 
     eval_ds = None
     if args.val:
         val_rows = _load_jsonl(args.val)
         print(f"  val rows:   {len(val_rows)}")
         eval_ds = Dataset.from_list([_to_chat_format(r) for r in val_rows])
+        eval_ds = eval_ds.map(_apply_template, remove_columns=["messages"])
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -125,16 +132,12 @@ def main():
         save_total_limit=2,
         eval_strategy="steps" if eval_ds else "no",
         eval_steps=args.save_steps if eval_ds else None,
+        dataset_text_field="text",
         max_length=args.max_len,
-        completion_only_loss=True,   # mask prompt tokens from loss
+        completion_only_loss=True,
         report_to=[],
         seed=args.seed,
     )
-
-    def formatting_func(example):
-        return tokenizer.apply_chat_template(
-            example["messages"], tokenize=False, add_generation_prompt=False
-        )
 
     trainer = SFTTrainer(
         model=model,
@@ -142,7 +145,6 @@ def main():
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         processing_class=tokenizer,
-        formatting_func=formatting_func,
     )
 
     print("Starting SFT...")
