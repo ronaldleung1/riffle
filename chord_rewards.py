@@ -10,9 +10,16 @@ training loops alike.
 
 Public API:
     STYLE_DESCRIPTIONS, CHORD_ALIASES
-    build_prompt(key, mode, style, num_bars) -> str
-    parse_chord_list(raw) -> list[str] | None
-    validate(chords, key, mode, num_bars, style) -> (errors, reward, breakdown)
+
+    Simple mode (Phase 1 baseline):
+        build_prompt(key, mode, style, num_bars) -> str
+        parse_chord_list(raw) -> list[str] | None
+        validate(chords, key, mode, num_bars, style) -> (errors, reward, breakdown)
+
+    Sectional mode (RLVR, Phase 2):
+        build_prompt_sectional(style, sections) -> str
+        parse_sectional_progression(raw) -> dict | None
+        validate_sectional(raw, requested_sections) -> (errors, reward, breakdown)
 """
 
 import json
