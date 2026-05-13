@@ -16,3 +16,5 @@ midi2audio
 pydub
 datasets
 trl
+# unsloth is installed via its own Colab cell (version depends on CUDA/triton)
+# see training notebook setup cell

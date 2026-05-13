@@ -1,7 +1,7 @@
 """
 baseline_chord_gen.py
 ---------------------
-Sectional chord progression generator using Qwen/Qwen3.5-0.8B.
+Sectional chord progression generator using Qwen3-1.7B.
 Validates output against structural compliance reward (validate_sectional).
 
 Usage (Colab):
@@ -37,7 +37,7 @@ from data.notation import to_music21
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL_ID = "Qwen/Qwen3.5-0.8B"
+MODEL_ID = "unsloth/Qwen3-1.7B"
 
 MIDI_TEMPO    = 120   # BPM
 BEATS_PER_BAR = 4
@@ -213,7 +213,7 @@ def generate_sectional(
     quiet: bool = False,
 ) -> GenerationResultSectional:
     """
-    Generate and validate a sectional chord progression using Qwen/Qwen3.5-0.8B.
+    Generate and validate a sectional chord progression using Qwen3-1.7B.
 
     Returns a GenerationResultSectional with validation details and reward score.
     If valid (reward > 0.5 and no errors), writes MIDI and optionally MP3/report.

@@ -124,7 +124,7 @@ def _write_summary_md(summary: dict, path: Path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-model", default="Qwen/Qwen3.5-0.8B",
+    parser.add_argument("--base-model", default="unsloth/Qwen3-1.7B",
                         help="Base model ID for the zero-shot condition")
     parser.add_argument("--sft", default=None, help="SFT checkpoint dir (optional)")
     parser.add_argument("--grpo", default=None, help="SFT+GRPO checkpoint dir (optional)")
