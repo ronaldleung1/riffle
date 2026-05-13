@@ -1,7 +1,7 @@
 """
 sft_train.py — Supervised fine-tune Qwen3-1.7B on Chordonomicon sectional data.
 
-Uses Unsloth + LoRA (rank 32) for 2x faster training with less VRAM.
+Uses Unsloth + QLoRA for faster training with less VRAM.
 Saves a merged 16-bit model so eval.py can load it with standard HuggingFace.
 
 Usage (Colab):
@@ -48,12 +48,17 @@ def main():
     parser.add_argument("--val",   default=None,  help="Path to val JSONL (optional)")
     parser.add_argument("--out",   default="riffle-sft", help="Output checkpoint dir")
     parser.add_argument("--model", default="unsloth/Qwen3-1.7B")
-    parser.add_argument("--lora-rank",  type=int,   default=32)
+    parser.add_argument("--lora-rank",  type=int,   default=16)
     parser.add_argument("--epochs",     type=float, default=1.0)
-    parser.add_argument("--batch-size", type=int,   default=4)
-    parser.add_argument("--grad-accum", type=int,   default=2)
+    parser.add_argument("--batch-size", type=int,   default=1)
+    parser.add_argument("--grad-accum", type=int,   default=8)
     parser.add_argument("--lr",         type=float, default=2e-4)
-    parser.add_argument("--max-len",    type=int,   default=1024)
+    parser.add_argument("--max-len",    type=int,   default=768)
+    parser.add_argument("--load-in-4bit", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Load base model in 4-bit for QLoRA; use --no-load-in-4bit if VRAM allows.")
+    parser.add_argument("--bf16", action="store_true",
+                        help="Use bf16 instead of fp16. Leave off for Colab T4.")
     parser.add_argument("--max-train-samples", type=int, default=None,
                         help="Cap training set size (smoke test: 500)")
     parser.add_argument("--max-steps",  type=int, default=None,
@@ -70,7 +75,7 @@ def main():
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model,
         max_seq_length=args.max_len,
-        load_in_4bit=False,      # LoRA 16-bit (bfloat16)
+        load_in_4bit=args.load_in_4bit,
         fast_inference=False,    # vLLM not needed for SFT
     )
 
@@ -107,13 +112,14 @@ def main():
         num_train_epochs=args.epochs,
         max_steps=args.max_steps if args.max_steps else -1,
         per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         optim="adamw_8bit",
-        bf16=True,
+        fp16=not args.bf16,
+        bf16=args.bf16,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=2,
