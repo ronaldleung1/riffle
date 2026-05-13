@@ -319,15 +319,19 @@ def _lcs(a: list, b: list) -> int:
     return dp[m][n]
 
 
-def _section_max_jaccard(parsed_sections: list) -> float:
-    """Compute the maximum pairwise Jaccard similarity between distinct section types.
+def _section_mean_jaccard(parsed_sections: list) -> float:
+    """Compute the mean pairwise Jaccard similarity between distinct section types.
 
     Each distinct section *name* (e.g. 'verse', 'chorus') is collapsed into the
     union of its chord sets across all instances.  The Jaccard index is then
-    computed for every pair of distinct names, and the maximum is returned.
+    computed for every pair of distinct names, and the mean is returned.
+
+    Mean is preferred over max because real songs naturally share chord material
+    between tonic-area sections (verse/chorus often share I-V-vi-IV); max would
+    flag those as "gamed" even when the song's overall diversity is healthy.
 
     Returns:
-        Max Jaccard in [0.0, 1.0].  Returns 0.0 if fewer than 2 distinct names.
+        Mean Jaccard in [0.0, 1.0].  Returns 0.0 if fewer than 2 distinct names.
     """
     # Merge chord sets per section name
     chord_sets: dict[str, set] = {}
@@ -338,20 +342,16 @@ def _section_max_jaccard(parsed_sections: list) -> float:
     if len(names) < 2:
         return 0.0
 
-    max_jac = 0.0
+    jaccards = []
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             a = chord_sets[names[i]]
             b = chord_sets[names[j]]
             union = a | b
-            if not union:
-                jac = 0.0
-            else:
-                jac = len(a & b) / len(union)
-            if jac > max_jac:
-                max_jac = jac
+            jac = (len(a & b) / len(union)) if union else 0.0
+            jaccards.append(jac)
 
-    return max_jac
+    return sum(jaccards) / len(jaccards)
 
 
 def validate_sectional(
@@ -369,11 +369,23 @@ def validate_sectional(
         A tuple ``(errors, reward, breakdown)`` where:
 
         * ``errors`` is a list of human-readable error strings (may be empty).
-        * ``reward`` is a float in ``[0.0, 1.0]`` — equals compliance
-          (0.5·presence + 0.5·order).  Gaming stats are tracked in the
-          breakdown but do not affect the reward.
+        * ``reward`` is a float in ``[0.0, 1.0]`` — a weighted sum of
+          presence, order, and diversity (see below).
         * ``breakdown`` is a dict with keys ``presence``, ``order``,
-          ``compliance``, ``max_jaccard``, and ``gamed``.
+          ``compliance``, ``diversity``, ``mean_jaccard``, and ``gamed``.
+
+    Reward shape:
+        reward = 0.35 * presence + 0.35 * order + 0.3 * diversity
+
+        diversity = clip((1 - mean_jaccard) / 0.4, 0, 1) — calibrated so
+        that the Chordonomicon dataset's typical mean-Jaccard (~0.6,
+        measured across train/val/test) scores 1.0, and a model that
+        copies the same chord set across every section (jaccard → 1.0)
+        scores 0.0. Sub-0.6 jaccards do not earn extra credit; the
+        dataset is the target, not a floor to undershoot.
+
+        Mean (not max) so that one naturally-similar pair like verse/chorus
+        sharing diatonic chords doesn't tank the whole reward.
     """
     # 1. Parse
     parsed = parse_sectional_progression(raw)
@@ -385,7 +397,8 @@ def validate_sectional(
                 "presence": 0.0,
                 "order": 0.0,
                 "compliance": 0.0,
-                "max_jaccard": 0.0,
+                "diversity": 0.0,
+                "mean_jaccard": 0.0,
                 "gamed": False,
             },
         )
@@ -401,14 +414,16 @@ def validate_sectional(
     r_order = _lcs(requested_names_seq, output_names_seq) / len(requested_names_seq)
     r_compliance = 0.5 * r_presence + 0.5 * r_order
 
-    # 3. Gaming stats — monitored but NOT applied to reward.
-    # Jaccard penalises chorus≈chorus which is musically valid; reintroduce
-    # a calibrated term later if ablations show it helps.
-    max_jac = _section_max_jaccard(parsed["sections"])
-    gamed = max_jac > 0.9
+    # 3. Diversity reward, calibrated to the dataset (~0.6 mean-Jaccard
+    # across train/val/test — see scripts/analyze_section_jaccard_dataset.py).
+    mean_jac = _section_mean_jaccard(parsed["sections"])
+    r_diversity = max(0.0, min(1.0, (1.0 - mean_jac) / 0.4))
+    gamed = mean_jac > 0.9
 
-    # 4. Final reward = compliance only
-    reward = r_compliance
+    # 4. Final reward: weighted sum. Compliance dominates (0.7) so the
+    # model can't trade structure for diversity; diversity (0.3) gives
+    # GRPO a real gradient once compliance saturates.
+    reward = 0.35 * r_presence + 0.35 * r_order + 0.3 * r_diversity
 
     # 5. Error list
     errors: list[str] = []
@@ -418,7 +433,7 @@ def validate_sectional(
     if r_order < 1.0:
         errors.append("section order does not match request")
     if gamed:
-        errors.append(f"sections too similar (max Jaccard = {max_jac:.2f})")
+        errors.append(f"sections too similar (mean Jaccard = {mean_jac:.2f})")
 
     return (
         errors,
@@ -427,7 +442,8 @@ def validate_sectional(
             "presence": r_presence,
             "order": r_order,
             "compliance": r_compliance,
-            "max_jaccard": max_jac,
+            "diversity": r_diversity,
+            "mean_jaccard": mean_jac,
             "gamed": gamed,
         },
     )

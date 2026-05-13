@@ -4,7 +4,7 @@ import pytest
 
 from chord_rewards import (
     _lcs,
-    _section_max_jaccard,
+    _section_mean_jaccard,
     parse_sectional_progression,
     validate_sectional,
 )
@@ -108,13 +108,14 @@ class TestWrongOrder:
 
 
 # ---------------------------------------------------------------------------
-# 4. Gamed — every section has identical chords → max_jaccard > 0.9, reward 0
+# 4. Gamed — every section has identical chords → mean_jaccard = 1.0, diversity = 0
+#    Compliance is still full, so reward = 0.35 + 0.35 + 0 = 0.7 (no longer zero).
 # ---------------------------------------------------------------------------
 
 class TestGamedOutput:
     SAME_CHORDS = ["C", "G", "Am", "F"]
 
-    def test_reward_is_zero(self):
+    def test_reward_loses_diversity_weight(self):
         raw = _make_raw(
             ("intro",  1, self.SAME_CHORDS),
             ("verse",  1, self.SAME_CHORDS),
@@ -123,9 +124,11 @@ class TestGamedOutput:
         requested = ["intro", "verse", "chorus"]
         _, reward, breakdown = validate_sectional(raw, requested)
 
-        assert reward == pytest.approx(0.0)
+        # Compliance (presence + order) is full; diversity term is zero.
+        assert reward == pytest.approx(0.7)
         assert breakdown["gamed"] is True
-        assert breakdown["max_jaccard"] == pytest.approx(1.0)
+        assert breakdown["mean_jaccard"] == pytest.approx(1.0)
+        assert breakdown["diversity"] == pytest.approx(0.0)
 
     def test_gamed_error_message(self):
         raw = _make_raw(
@@ -259,24 +262,24 @@ class TestLCS:
 
 
 # ---------------------------------------------------------------------------
-# Unit test: _section_max_jaccard
+# Unit test: _section_mean_jaccard
 # ---------------------------------------------------------------------------
 
-class TestSectionMaxJaccard:
+class TestSectionMeanJaccard:
     def test_identical_sections_returns_one(self):
-        # verse and chorus have exact same chord set
+        # verse and chorus have exact same chord set (only one pair → mean = max)
         sections = [
             ("verse",  1, ["C", "G", "Am", "F"]),
             ("chorus", 1, ["C", "G", "Am", "F"]),
         ]
-        assert _section_max_jaccard(sections) == pytest.approx(1.0)
+        assert _section_mean_jaccard(sections) == pytest.approx(1.0)
 
     def test_disjoint_sections_returns_zero(self):
         sections = [
             ("verse",  1, ["C", "G"]),
             ("chorus", 1, ["Am", "F"]),
         ]
-        assert _section_max_jaccard(sections) == pytest.approx(0.0)
+        assert _section_mean_jaccard(sections) == pytest.approx(0.0)
 
     def test_partial_overlap(self):
         # A={C,G,Am}, B={C,G,F} → intersection={C,G}, union={C,G,Am,F} → 2/4=0.5
@@ -284,7 +287,7 @@ class TestSectionMaxJaccard:
             ("verse",  1, ["C", "G", "Am"]),
             ("chorus", 1, ["C", "G", "F"]),
         ]
-        jac = _section_max_jaccard(sections)
+        jac = _section_mean_jaccard(sections)
         assert jac == pytest.approx(0.5)
 
     def test_single_section_name_returns_zero(self):
@@ -293,16 +296,29 @@ class TestSectionMaxJaccard:
             ("verse", 1, ["C", "G"]),
             ("verse", 2, ["Am", "F"]),
         ]
-        assert _section_max_jaccard(sections) == pytest.approx(0.0)
+        assert _section_mean_jaccard(sections) == pytest.approx(0.0)
 
     def test_merges_same_name_instances(self):
         # verse_1={C,G}, verse_2={C,F} → merged verse={C,G,F}
-        # chorus_1={C,G,F}
-        # Jaccard = |{C,G,F} ∩ {C,G,F}| / |{C,G,F} ∪ {C,G,F}| = 3/3 = 1.0
+        # chorus_1={C,G,F}; Jaccard = 3/3 = 1.0
         sections = [
             ("verse",  1, ["C", "G"]),
             ("verse",  2, ["C", "F"]),
             ("chorus", 1, ["C", "G", "F"]),
         ]
-        jac = _section_max_jaccard(sections)
+        jac = _section_mean_jaccard(sections)
         assert jac == pytest.approx(1.0)
+
+    def test_averages_over_multiple_pairs(self):
+        # 3 distinct names → C(3,2) = 3 pairs.
+        # verse={C,G}, chorus={C,G} → jac=1.0
+        # verse={C,G}, bridge={Am,F} → jac=0.0
+        # chorus={C,G}, bridge={Am,F} → jac=0.0
+        # mean = 1/3
+        sections = [
+            ("verse",  1, ["C", "G"]),
+            ("chorus", 1, ["C", "G"]),
+            ("bridge", 1, ["Am", "F"]),
+        ]
+        jac = _section_mean_jaccard(sections)
+        assert jac == pytest.approx(1.0 / 3.0)

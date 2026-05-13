@@ -55,9 +55,15 @@ Structures without intro/outro (`verse-chorus-verse-chorus-bridge-chorus`) score
 
 ### Reward function evolution
 
-1. **Original design**: `reward = r_compliance * (1 - gaming_penalty)` where gaming_penalty = 1.0 if max pairwise Jaccard > 0.9.
-2. **Problem discovered**: Jaccard compares across *distinct section types*. A chorus that sounds like another chorus is musically valid — the penalty was incorrectly zeroing out 80% of base-model trajectories that had good structural compliance.
-3. **Current design**: `reward = 0.5 * r_presence + 0.5 * r_order`. Gaming stats (max_jaccard, gamed flag) remain in the breakdown dict and eval CSV for monitoring. Reintroduce a calibrated term after training stabilises if ablations show it helps.
+1. **Original design**: `reward = r_compliance * (1 - gaming_penalty)` where gaming_penalty = 1.0 if max pairwise Jaccard > 0.9. Binary cliff, multiplicative — no gradient, and when triggered it nuked compliance entirely.
+2. **Intermediate design (compliance-only)**: `reward = 0.5 * r_presence + 0.5 * r_order`. Cleaner, but SFT saturated it immediately — GRPO smoke showed reward=1.0, reward_std=0.0, loss=0.0 across all rollouts. No gradient signal.
+3. **Current design (post-SFT-saturation, 2026-05-13)**: `reward = 0.35 * presence + 0.35 * order + 0.3 * diversity`.
+   - `diversity = clip((1 - mean_jaccard) / 0.4, 0, 1)` — linear ramp over the **mean** pairwise Jaccard between distinct section types (verse vs chorus vs bridge, etc.). Same-name repeats (`chorus_1`, `chorus_2`) are already merged into one set before pairing.
+   - **Mean, not max**: real songs share diatonic material between tonic-area sections (verse/chorus often overlap on I-V-vi-IV). Max would flag those as "gamed" when overall diversity is healthy. Mean rewards song-wide variety, lets one similar pair slide.
+   - **Calibration constant 0.4** chosen from `scripts/analyze_section_jaccard_dataset.py` re-run with mean: dataset mean-Jaccard ≈ 0.62 (mean), 0.61 (median), consistent across train/val/test. Picking 0.4 puts dataset-typical jaccard right at full diversity credit (jaccard 0.6 → 1.0, jaccard 0.8 → 0.5, jaccard 1.0 → 0.0).
+   - **Dataset itself has 15% "gamed" rows** (mean_jaccard > 0.9) — single-section songs and minimalist progressions exist legitimately. Worth noting but not actionable; the reward still pushes the model toward the bulk of the distribution.
+   - Compliance still dominates (0.7 weight) so the model can't trade structure for diversity. Diversity (0.3) is enough to give GRPO non-zero advantages now that SFT nails compliance.
+   - Additive, not multiplicative — gaming a section no longer zeros the whole reward.
 
 ### Model selection history
 

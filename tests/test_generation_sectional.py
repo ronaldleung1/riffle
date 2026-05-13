@@ -17,7 +17,7 @@ class TestGenerationResultSectionalDataclass:
             valid=True,
             reward=0.8,
             errors=[],
-            breakdown={"presence": 1.0, "order": 1.0, "compliance": 1.0, "max_jaccard": 0.0, "gamed": False},
+            breakdown={"presence": 1.0, "order": 1.0, "compliance": 1.0, "diversity": 1.0, "mean_jaccard": 0.0, "gamed": False},
         )
         assert result.prompt == "test prompt"
         assert result.raw_output == "<verse_1> C G Am"
@@ -136,7 +136,7 @@ class TestFormatReport:
             valid=True,
             reward=0.9,
             errors=[],
-            breakdown={"presence": 1.0, "order": 1.0, "compliance": 1.0, "max_jaccard": 0.0, "gamed": False},
+            breakdown={"presence": 1.0, "order": 1.0, "compliance": 1.0, "diversity": 1.0, "mean_jaccard": 0.0, "gamed": False},
             midi_path="/tmp/test.mid",
         )
         report = result.format_report()

@@ -1,9 +1,10 @@
 """Measure cross-section-name Jaccard overlap in local Chordonomicon JSONL splits.
 
-Mirrors ``parse_sectional_progression`` + ``_section_max_jaccard`` in
+Mirrors ``parse_sectional_progression`` + ``_section_mean_jaccard`` in
 ``chord_rewards.py`` without importing that module (avoids ``music21``).
 For each distinct section *name*, merge chord symbols across instances;
-max pairwise Jaccard between names; ``gamed`` if max > threshold (default 0.9).
+report both **mean** (used by the reward) and **max** pairwise Jaccard
+between names; ``gamed`` if mean > threshold (default 0.9).
 
 Run from repo root::
 
@@ -47,26 +48,28 @@ def _parse_completion(raw: str) -> dict | None:
     return {"sections": sections}
 
 
-def _section_max_jaccard(parsed_sections: list) -> float:
-    """Mirror ``chord_rewards._section_max_jaccard`` (pairwise Jaccard on merged name sets)."""
+def _section_jaccards(parsed_sections: list) -> tuple[float, float] | tuple[None, None]:
+    """Return (mean, max) pairwise Jaccard between distinct section names.
+
+    Returns (None, None) when fewer than two distinct names exist.
+    """
     chord_sets: dict[str, set] = {}
     for name, _, chords in parsed_sections:
         chord_sets.setdefault(name, set()).update(chords)
 
     names = list(chord_sets.keys())
     if len(names) < 2:
-        return 0.0
+        return None, None
 
-    max_jac = 0.0
+    jaccards = []
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             a = chord_sets[names[i]]
             b = chord_sets[names[j]]
             union = a | b
             jac = 0.0 if not union else len(a & b) / len(union)
-            if jac > max_jac:
-                max_jac = jac
-    return max_jac
+            jaccards.append(jac)
+    return sum(jaccards) / len(jaccards), max(jaccards)
 
 _DEFAULT_FILES = [
     _REPO_ROOT / "data" / "chordonomicon_train.jsonl",
@@ -85,19 +88,31 @@ def _bucket(x: float) -> str:
     return "0.90–1.00"
 
 
-def _row_stats(row: dict) -> tuple[bool, float | None, str]:
-    """Returns (unparseable, max_jaccard_or_None, style).
+def _row_stats(row: dict) -> tuple[bool, float | None, float | None, str]:
+    """Returns (unparseable, mean_jaccard_or_None, max_jaccard_or_None, style).
 
-    ``max_jaccard`` is None when unparseable or fewer than two distinct section names.
+    Both jaccards are None when unparseable or fewer than two distinct section names.
     """
     style = row.get("style", "unknown")
     parsed = _parse_completion(row.get("completion", ""))
     if parsed is None:
-        return True, None, style
-    names = {s[0] for s in parsed["sections"]}
-    if len(names) < 2:
-        return False, None, style
-    return False, _section_max_jaccard(parsed["sections"]), style
+        return True, None, None, style
+    mean_j, max_j = _section_jaccards(parsed["sections"])
+    if mean_j is None:
+        return False, None, None, style
+    return False, mean_j, max_j, style
+
+
+def _summarise(values: list[float]) -> dict:
+    if not values:
+        return {"mean": None, "median": None, "p90": None, "p99": None}
+    qs = statistics.quantiles(values, n=100) if len(values) >= 100 else [max(values)] * 100
+    return {
+        "mean": statistics.mean(values),
+        "median": statistics.median(values),
+        "p90": qs[89],
+        "p99": qs[98],
+    }
 
 
 def _build_report(
@@ -106,12 +121,14 @@ def _build_report(
     unparseable: int,
     eligible: int,
     gamed: int,
+    mean_jacs: list[float],
     max_jacs: list[float],
     by_style_eligible: dict[str, int],
     by_style_gamed: dict[str, int],
 ) -> dict:
+    # Distribution bucketed on mean (the reward signal).
     buckets = {"0.00–0.50": 0, "0.50–0.70": 0, "0.70–0.90": 0, "0.90–1.00": 0}
-    for mj in max_jacs:
+    for mj in mean_jacs:
         buckets[_bucket(mj)] += 1
 
     out: dict = {
@@ -122,19 +139,10 @@ def _build_report(
         "gamed_count": gamed,
         "gamed_rate_of_eligible": (gamed / eligible) if eligible else 0.0,
         "gamed_rate_of_total": (gamed / total) if total else 0.0,
-        "buckets": buckets,
+        "buckets_mean": buckets,
+        "mean_jaccard": _summarise(mean_jacs),
+        "max_jaccard":  _summarise(max_jacs),
     }
-    if max_jacs:
-        out["max_jaccard_mean"] = statistics.mean(max_jacs)
-        out["max_jaccard_median"] = statistics.median(max_jacs)
-        qs = statistics.quantiles(max_jacs, n=100)
-        out["max_jaccard_p90"] = qs[89]
-        out["max_jaccard_p99"] = qs[98]
-    else:
-        out["max_jaccard_mean"] = None
-        out["max_jaccard_median"] = None
-        out["max_jaccard_p90"] = None
-        out["max_jaccard_p99"] = None
 
     style_rates = {}
     for st, el in sorted(by_style_eligible.items()):
@@ -147,9 +155,9 @@ def _build_report(
 def analyze_path(path: Path, threshold: float) -> dict:
     total = 0
     unparseable = 0
-    # Rows where at least two distinct section names exist (same as reward logic for max_jac).
     eligible = 0
     gamed = 0
+    mean_jacs: list[float] = []
     max_jacs: list[float] = []
     by_style_gamed: dict[str, int] = {}
     by_style_eligible: dict[str, int] = {}
@@ -160,23 +168,26 @@ def analyze_path(path: Path, threshold: float) -> dict:
             if not line:
                 continue
             total += 1
-            bad, mj, style = _row_stats(json.loads(line))
+            bad, mean_j, max_j, style = _row_stats(json.loads(line))
             if bad:
                 unparseable += 1
                 continue
-            if mj is None:
+            if mean_j is None:
                 continue
 
             eligible += 1
             by_style_eligible[style] = by_style_eligible.get(style, 0) + 1
 
-            max_jacs.append(mj)
-            if mj > threshold:
+            mean_jacs.append(mean_j)
+            max_jacs.append(max_j)
+            # "Gamed" tracked on mean since the reward function uses mean.
+            if mean_j > threshold:
                 gamed += 1
                 by_style_gamed[style] = by_style_gamed.get(style, 0) + 1
 
     return _build_report(
-        path, total, unparseable, eligible, gamed, max_jacs, by_style_eligible, by_style_gamed
+        path, total, unparseable, eligible, gamed,
+        mean_jacs, max_jacs, by_style_eligible, by_style_gamed,
     )
 
 
@@ -214,16 +225,21 @@ def main() -> None:
         print(f"  rows:              {r['total_rows']}")
         print(f"  unparseable:       {r['unparseable']}")
         print(f"  eligible (≥2 names): {r['eligible_rows']}")
-        print(f"  gamed (max Jaccard > {args.threshold}): {r['gamed_count']}")
+        print(f"  gamed (mean Jaccard > {args.threshold}): {r['gamed_count']}")
         print(f"  gamed / eligible:  {100 * r['gamed_rate_of_eligible']:.2f}%")
         print(f"  gamed / all rows:  {100 * r['gamed_rate_of_total']:.2f}%")
-        if r["max_jaccard_mean"] is not None:
+        mj = r["mean_jaccard"]
+        xj = r["max_jaccard"]
+        if mj["mean"] is not None:
             print(
-                f"  max_jaccard: mean={r['max_jaccard_mean']:.3f} "
-                f"median={r['max_jaccard_median']:.3f} "
-                f"p90={r['max_jaccard_p90']:.3f} p99={r['max_jaccard_p99']:.3f}"
+                f"  mean_jaccard: mean={mj['mean']:.3f} median={mj['median']:.3f} "
+                f"p90={mj['p90']:.3f} p99={mj['p99']:.3f}    <-- reward calibration target"
             )
-        print(f"  distribution (eligible only): {r['buckets']}")
+            print(
+                f"  max_jaccard:  mean={xj['mean']:.3f} median={xj['median']:.3f} "
+                f"p90={xj['p90']:.3f} p99={xj['p99']:.3f}"
+            )
+        print(f"  distribution of mean_jaccard (eligible only): {r['buckets_mean']}")
         print("  by style (gamed / eligible):")
         for st, info in r["by_style"].items():
             print(f"    {st:12s} {info['gamed']:5d} / {info['eligible']:5d}  ({100 * info['rate']:.1f}%)")

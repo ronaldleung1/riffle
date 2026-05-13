@@ -7,10 +7,10 @@ Defaults are conservative enough for a Colab T4.
 
 Saves a merged 16-bit model so eval.py can load it with standard HuggingFace.
 
-Reward function (verifiable, no learned reward model):
-  reward = r_compliance * (1 - gaming_penalty)
-    r_compliance = 0.5 * r_presence + 0.5 * r_order
-    gaming_penalty = 1.0 if max pairwise Jaccard > 0.9 else 0.0
+Reward function (verifiable, no learned reward model — see chord_rewards.py):
+  reward = 0.35 * r_presence + 0.35 * r_order + 0.3 * r_diversity
+    r_diversity is calibrated so the dataset's ~0.5 max-Jaccard scores 1.0
+    and identical-chords-across-sections scores 0.0.
 
 Usage:
     python grpo_train.py \
