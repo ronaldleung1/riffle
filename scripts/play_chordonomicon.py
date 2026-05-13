@@ -6,6 +6,7 @@ Usage in Jupyter/Colab:
     play_random(style="rock", section="chorus")
 """
 
+import os
 import random
 import tempfile
 from datasets import load_dataset
@@ -86,14 +87,13 @@ def play_random(
     # Convert to music21 notation
     chords_m21 = [to_music21(chord) for chord in chords]
 
-    # Render to MIDI
-    mid_fd, mid_path = tempfile.mkstemp(suffix=".mid", delete=False)
-    import os
+    # Render to MIDI (mkstemp returns a file descriptor we must close immediately)
+    mid_fd, mid_path = tempfile.mkstemp(suffix=".mid")
     os.close(mid_fd)
     render_midi(chords_m21, mid_path)
 
     # Render to MP3
-    mp3_fd, mp3_path = tempfile.mkstemp(suffix=".mp3", delete=False)
+    mp3_fd, mp3_path = tempfile.mkstemp(suffix=".mp3")
     os.close(mp3_fd)
     render_mp3(mid_path, mp3_path)
 
