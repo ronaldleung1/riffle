@@ -62,6 +62,7 @@ def _evaluate_checkpoint(label: str, model_id: str, samples: int, seed: int) -> 
                     "sample": i,
                     "reward": result.reward,
                     "valid": result.valid,
+                    "parseable": result.parsed_sections is not None,
                     "presence": result.breakdown.get("presence", 0.0),
                     "order": result.breakdown.get("order", 0.0),
                     "gamed": result.breakdown.get("gamed", False),
