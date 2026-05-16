@@ -251,14 +251,21 @@ def generate_sectional(
     parsed_sections = parse_sectional_progression(raw_output)
     valid = reward > 0.5 and len(errors) == 0
 
+    # Render audio whenever the output is parseable. `valid` is the stricter
+    # RLVR pass/fail flag (reward > 0.5, no errors) and is reported separately;
+    # we still want to listen to outputs that parsed but scored below threshold.
     midi_path = None
     mp3_path = None
-    if valid and parsed_sections and output_midi_path:
-        midi_path, mp3_path = _render_sectional_audio(
-            parsed_sections["sections"], output_midi_path, output_mp3_path, quiet
-        )
-    elif not quiet and not valid:
-        print(f"✗ Invalid progression (reward={reward:.3f}). No MIDI generated.")
+    if parsed_sections and output_midi_path:
+        try:
+            midi_path, mp3_path = _render_sectional_audio(
+                parsed_sections["sections"], output_midi_path, output_mp3_path, quiet
+            )
+        except Exception as e:
+            if not quiet:
+                print(f"✗ Render failed: {e}")
+    elif not quiet and parsed_sections is None:
+        print(f"✗ Unparseable output (reward={reward:.3f}). No MIDI generated.")
 
     result = GenerationResultSectional(
         prompt=prompt,
